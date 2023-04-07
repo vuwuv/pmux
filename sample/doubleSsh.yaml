@@ -1,0 +1,16 @@
+doubleSsh:  
+  name: doubleSsh
+  multihistory: true
+  ssh: 
+    main:
+      host: main
+      login: root
+  windows:
+    alpha:
+      ssh: 
+        - main
+        - host: alpha
+    beta:
+      ssh: 
+        - main
+        - host: beta

@@ -1,0 +1,7 @@
+rsyncGit:
+  name: rsyncGit
+  multihistory: true
+  windows:
+    project:
+      cmd: while inotifywait -e modify,move,delete -r ./; do rsync -rvut --delete ./ rsync@rsync.storage:git/project/; done
+      home: ~/git/project

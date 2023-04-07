@@ -1,0 +1,8 @@
+multiConsole:
+  name: multiConsole
+  home: ~/dev
+  multihistory: true
+  windows:
+    alpha:
+    beta:
+
