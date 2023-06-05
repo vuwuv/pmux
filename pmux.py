@@ -654,23 +654,23 @@ def run_reload(args):
 parser = argparse.ArgumentParser(description='tmux session manager')
 subparsers = parser.add_subparsers(help='sub-command help', dest='command')
 
-start_parser = subparsers.add_parser('s', help='start new sessions from yaml configs (select at selection screen)')
+start_parser = subparsers.add_parser('s', description='start new sessions from yaml configs (select at selection screen)')
 start_parser.add_argument('-a', '--all', action='store_true', help='process all the sessions omitting selection screen')
 start_parser.add_argument('-s', '--save', action='store_true', help='save started sessions to config file')
 start_parser.add_argument('-n', '--names', nargs='*', help='session names to start')
 start_parser.add_argument('-v', '--verbose', action='store_true', help='print tmux commands executed')
 start_parser.add_argument('files', nargs='*', help='yaml config files to start sessions from')
 
-kill_parser = subparsers.add_parser('k', help='kill sessions (session list or select at selection screen)')
+kill_parser = subparsers.add_parser('k', description='kill sessions (session list or select at selection screen)')
 kill_parser.add_argument('-a', '--all', action='store_true', help='process all the sessions omitting selection screen')
 kill_parser.add_argument('-v', '--verbose', action='store_true', help='print tmux commands executed')
 kill_parser.add_argument('names', nargs='*', help='session names to kill')
 
-attach_parser = subparsers.add_parser('a', help='attach to session (session name or select at selection screen)')
+attach_parser = subparsers.add_parser('a', description='attach to session (session name or select at selection screen)')
 attach_parser.add_argument('-v', '--verbose', action='store_true', help='print tmux commands executed')
 attach_parser.add_argument('name', nargs='?', help='session name to attach to')
 
-reload_parser = subparsers.add_parser('r', help='reload windows')
+reload_parser = subparsers.add_parser('r', description='reload windows (session list or select at selection screen)')
 reload_parser.add_argument('-v', '--verbose', action='store_true', help='print tmux commands executed')
 reload_parser.add_argument('-a', '--all', action='store_true', help='process all the sessions omitting selection screen')
 reload_parser.add_argument('names', nargs='*', help='session names to reload')
@@ -683,7 +683,8 @@ subparsers_actions = [
 
 args = parser.parse_args()
 
-verbose = args.verbose
+if 'verbose' in args:
+    verbose = args.verbose
 
 try:
     if args.command == 's':
@@ -697,10 +698,9 @@ try:
     elif args.command == 'h':
         for subparsers_action in subparsers_actions:
             for choice, subparser in subparsers_action.choices.items():
-                print("command '{}'".format(choice))
-                print(subparser.format_help())
+                print("command '{}': {}".format(choice, subparser.format_help()))
 except Exception as e:
-    #print(e)
-    raise e
+    print(e)
+    #raise e
 
 exit(0)
