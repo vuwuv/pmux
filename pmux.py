@@ -6,8 +6,10 @@ import sys
 import string
 import curses
 import os
+import argparse
 
-userConfigFile = os.path.expanduser("~/.pmux.yaml")
+user_config_file = os.path.expanduser("~/.pmux.yaml")
+verbose = False
 
 class NameCommandList:
     def __init__(self):
@@ -138,7 +140,7 @@ def choose_elements(hint, items, unique_selection=False):
             elif user_input == 10:  # ENTER
                 break
             elif user_input == 27:  # ESC
-                sys.exit(0)
+                exit(0)
                 break
             elif user_input == curses.KEY_BACKSPACE:  # BACKSPACE
                 selected_items.clear()
@@ -180,21 +182,228 @@ def choose_elements(hint, items, unique_selection=False):
     result = curses.wrapper(main)
     return result if unique_selection else [items[i] for i in selected_items]
 
-def attach(sessionName):
+def verify_ssh_config(session_name, ssh_name, ssh_config):
+    if not isinstance(ssh_config, dict) and not isinstance(ssh_config, str):
+        raise TypeError(f"ssh {session_name}.{ssh_name} must be a dictionary or a string")
+    
+    if isinstance(ssh_config, str):
+        return
+
+    if "host" in ssh_config and not isinstance(ssh_config["host"], str):
+        raise KeyError(f"ssh {session_name}.{ssh_name} must contain a host (host: string)")
+
+    if "login" in ssh_config and not isinstance(ssh_config["login"], str):
+        raise KeyError(f"ssh {session_name}.{ssh_name} login must be a string")
+
+    if "port" in ssh_config and not isinstance(ssh_config["port"], int):
+        raise KeyError(f"ssh {session_name}.{ssh_name} port must be an integer")
+
+    if "keyfile" in ssh_config and not isinstance(ssh_config["keyfile"], str):
+        raise KeyError(f"ssh {session_name}.{ssh_name} keyfile must be a string")
+
+    if "preset" in ssh_config and not isinstance(ssh_config["preset"], str):
+        raise KeyError(f"ssh {session_name}.{ssh_name} preset must be a string")
+
+    if "parent" in ssh_config and not isinstance(ssh_config["parent"], str) and not isinstance(ssh_config["parent"], dict):
+        print(ssh_config["parent"])
+        raise KeyError(f"ssh {session_name}.{ssh_name} parent must be a string or a dictionary")
+
+    if "parent" in ssh_config and isinstance(ssh_config["parent"], dict):
+        verify_ssh_config(session_name, ssh_name + ".parent", ssh_config["parent"])
+
+    for key in ssh_config:
+        if key not in ["host", "login", "port", "keyfile", "preset", "parent"] and not key.startswith("$"):
+            raise KeyError(f"ssh {session_name}.{ssh_name} contains an unknown key {key}")
+
+def verify_window_config(session_name, window_name, window_config):
+    if not isinstance(window_config, dict) and not window_config is None:
+        raise TypeError(f"window {session_name}.{window_name} must be a dictionary or empty")
+
+    if window_config is None:
+        return
+
+    if "home" in window_config and not isinstance(window_config["home"], str):
+        raise KeyError(f"window {session_name}.{window_name} home must be a string")
+
+    if "multihistory" in window_config and not isinstance(window_config["multihistory"], bool):
+        raise KeyError(f"window {session_name}.{window_name} multihistory must be a boolean")
+
+    if "cmd" in window_config and not isinstance(window_config["cmd"], str):
+        raise KeyError(f"window {session_name}.{window_name} cmd must be a string")
+
+    if "ssh" in window_config:
+        verify_ssh_config(session_name, window_name, window_config["ssh"])
+
+    for key in window_config.keys():
+        if key not in ["home", "multihistory", "cmd", "ssh"]:
+            raise KeyError(f"window {session_name}.{window_name} contains unknown key '{key}'")
+
+def verify_session_config(session_name, session_config):
+    if not isinstance(session_config, dict):
+        raise TypeError(f"session {session_name} must be a dictionary")     
+    
+    if "name" not in session_config or not isinstance(session_config["name"], str):
+        raise KeyError(f"session {session_name} must contain a name (name: string)")
+
+    if "home" in session_config and not isinstance(session_config["home"], str):
+        raise KeyError(f"session {session_name} home must be a string")
+
+    if "windows" not in session_config or not isinstance(session_config["windows"], dict):
+        raise KeyError(f"session {session_name} must contain a windows (windows: dictionary)")        
+
+    if "ssh" in session_config:
+        for ssh_name, ssh_config in session_config["ssh"].items():
+            verify_ssh_config(session_name, ssh_name, ssh_config)
+
+    if "multihistory" in session_config and not isinstance(session_config["multihistory"], bool):
+        raise KeyError("multihistory must be a boolean")
+
+    for key in session_config:
+        if key not in ["name", "home", "windows", "ssh", "multihistory"]:
+            raise KeyError(f"session {session_name} contains unknown key '{key}'")
+
+    for window_name, window_config in session_config["windows"].items():
+        verify_window_config(session_name, window_name, window_config)
+
+def template_replace(template_string, variables):
+    NORMAL = 0
+    ESCAPE = 1
+    BRACE = 2
+
+    state = NORMAL
+    output = ""
+    buffer = ""
+
+    for char in template_string:
+        if state == NORMAL:
+            if char == '\\':
+                state = ESCAPE
+            elif char == '<':
+                state = BRACE
+                buffer = ""
+            else:
+                output += char
+        elif state == ESCAPE:
+            output += char
+            state = NORMAL
+        elif state == BRACE:
+            if char == '>':
+                if not buffer in variables:
+                    raise KeyError(f"variable '{buffer}' is not defined")
+                output += str(variables.get(buffer, ''))
+                state = NORMAL
+            else:
+                buffer += char
+
+    return output
+
+def template_ssh_config(ssh_config, user_vars = {}):
+    if not isinstance(ssh_config, dict):
+        raise TypeError(f"ssh_config must be a dictionary")
+
+    result = {}
+    vars_block = user_vars.copy()
+
+    for key in ssh_config:
+        if key.startswith("$"):
+            vars_block[key[1:]] = ssh_config[key]
+
+    for key in ssh_config:
+        if key in ["host", "login", "port", "keyfile"]:
+            result[key] = template_replace(str(ssh_config[key]), vars_block)
+
+    if 'parent' in ssh_config:
+        result['parent'] = template_ssh_config(ssh_config['parent'], vars_block)
+
+    return result
+
+def use_ssh_preset(target_config, preset_config):
+    ssh_config = {}
+
+    if preset_config:
+        for key in preset_config:
+            ssh_config[key] = preset_config[key]
+
+    for key in target_config:
+        ssh_config[key] = target_config[key]
+
+    if "preset" in ssh_config:
+        del ssh_config["preset"]
+
+    return ssh_config
+
+def fill_ssh_config(ssh_presets, ssh_config = None, preset_config = None, visited_names = []):
+    if ssh_config is None:
+        for ssh_name in ssh_presets:
+            fill_ssh_config(ssh_presets, ssh_name)
+        return
+
+    ssh_name = None
+
+    if isinstance(ssh_config, str):
+        ssh_name = ssh_config
+        if not ssh_name in ssh_presets:
+            raise KeyError(f"ssh preset {ssh_name} not found")
+        ssh_config = ssh_presets[ssh_name]
+
+    if isinstance(ssh_config, str):
+        if not ssh_config in ssh_presets:
+            raise KeyError(f"ssh preset {ssh_config} not found")
+        ssh_config = ssh_presets[ssh_config]
+
+    if ssh_name:
+        if visited_names.count(ssh_name) > 0:
+            raise KeyError(f"ssh preset circular reference: {visited_names + [ssh_name]}")
+        visited_names = visited_names + [ssh_name]
+
+    if isinstance(preset_config, str):
+        fill_ssh_config(ssh_presets, preset_config, visited_names)
+        preset_config = ssh_presets[preset_config]
+
+    if "preset" in ssh_config:
+        fill_ssh_config(ssh_presets, ssh_config["preset"], visited_names = visited_names)
+        preset_config = use_ssh_preset(ssh_presets[ssh_config["preset"]], preset_config)
+
+    parent_config = ssh_config.get("parent", None)
+
+    if parent_config:
+        if isinstance(parent_config, str):
+            fill_ssh_config(ssh_presets, parent_config, visited_names = visited_names)
+            parent_config = ssh_presets[parent_config]
+
+        if preset_config and 'parent' in preset_config:
+            parent_config = use_ssh_preset(parent_config, preset_config['parent'])
+
+        ssh_config['parent'] = parent_config
+        fill_ssh_config(ssh_presets, parent_config, visited_names = visited_names)
+
+    if preset_config:
+        ssh_config = use_ssh_preset(ssh_config, preset_config)
+
+    if ssh_name:
+        ssh_presets[ssh_name] = ssh_config
+
+    return ssh_config
+
+def attach(session_name):
+    exitcode = 0
+
     try:
-        subprocess.run(["tmux", "attach", "-t", sessionName], check=True)
+        subprocess.run(["tmux", "attach", "-t", session_name], check=True)
     except subprocess.CalledProcessError as e:
         if e.returncode == 1:
             print("No tmux session found to attach.")
         else:
             print(f"tmux attach failed with return code {e.returncode}")
+        exitcode = 1
     except KeyboardInterrupt:
         print("\nExiting...")
+        exitcode = 1
     finally:
-        sys.exit()
+        exit(exitcode)
 
 def execute(cmd, ignoreExitCode = False):
-    print(cmd)
+    if verbose: print(cmd)
     output = ""
     try:
         output = subprocess.check_output(['/bin/bash', '-c', cmd], stderr=subprocess.STDOUT).decode('utf8')
@@ -210,193 +419,288 @@ def isarray(var):
     return isinstance(var, list) and not isinstance(var, (str))
 
 def start(config):
-    setupName = config['name']
-    globalHomeDirectory = config.get('home', None)
-    globalMultihistory = config.get('multihistory', None)
-    multihistoryPath = f'~/.multihistory/{setupName}/'
+    setup_name = config['name']
+    global_home_directory = config.get('home', None)
+    global_multihistory = config.get('multihistory', None)
+    multihistory_path = f'~/.multihistory/{setup_name}/'
     if not config['windows']: return
     windows = config['windows']
 
-    sshPresets = config.get('ssh', None)
-    if sshPresets == None: sshPresets = dict()
+    ssh_presets = config.get('ssh', None)
+    if ssh_presets == None: ssh_presets = dict()
     
-    targetWindows = NameCommandList()
+    fill_ssh_config(ssh_presets)
 
-    for windowName in windows.keys():
-        window = windows[windowName]
+    for window_name in windows.keys():
+        window = windows[window_name]
+
+        if window and 'ssh' in window:
+            ssh_template = fill_ssh_config(ssh_presets, window['ssh'])
+            ssh_config = template_ssh_config(ssh_template)
+
+            ssh_stages = []
+            while ssh_config:
+                ssh_stages.append(ssh_config)
+                ssh_config = ssh_config.get('parent', None)
+
+            window['ssh'] = ssh_stages
+
+    target_windows = NameCommandList()
+
+    for window_name in windows.keys():
+        window = windows[window_name]
         if not window: window = dict()
-        historyArg = ''
-        mkdirHistoryArg = ''
-        homeArg = ''
-        multihistory = window.get('multihistory', globalMultihistory)
-        homeDirectory = window.get('home', globalHomeDirectory)
+        history_arg = ''
+        mkdirhistory_arg = ''
+        home_arg = ''
+        multihistory = window.get('multihistory', global_multihistory)
+        home_directory = window.get('home', global_home_directory)
         
         if multihistory: 
-            historyArg = f'HISTFILE={multihistoryPath}{windowName} '
-            mkdirHistoryArg = f'mkdir -p {multihistoryPath}; '
-        if homeDirectory: homeArg = f'cd {homeDirectory}; '
+            history_arg = f'HISTFILE={multihistory_path}{window_name} '
+            mkdirhistory_arg = f'mkdir -p {multihistory_path}; '
+        if home_directory: home_arg = f'cd {home_directory}; '
 
-        command = f"{homeArg}{mkdirHistoryArg}{historyArg}PROMPT_COMMAND='history -a' /bin/bash"
+        command = f"{home_arg}{mkdirhistory_arg}{history_arg}PROMPT_COMMAND='history -a' /bin/bash"
 
         if window:
             if cmd := window.get('cmd', None):
                 if not isarray(cmd): cmd = [cmd]
-                if homeDirectory: cmd = ['cd ' + homeDirectory] + cmd
+                if home_directory: cmd = ['cd ' + home_directory] + cmd
                 command = ' && '.join(cmd)
 
             if ssh := window.get('ssh', None):
-                if not isarray(ssh): ssh = [ssh]
-                ssh.reverse()
-                for sshStage in ssh:
-                    if not isinstance(sshStage, dict): sshStage = sshPresets[sshStage]
-                    loginArg = ''
-                    if (sshLogin := sshStage.get('login', None)): loginArg = f' -l {sshLogin}'
-                    command = f'ssh {sshStage["host"]}{loginArg} -t "{escape(command)}"'
+                for ssh_stage in ssh:
+                    port_arg = ''
+                    login_arg = ''
+                    keyfile_arg = ''
+                    if (ssh_login := ssh_stage.get('login', None)): login_arg = f' -l {ssh_login}'
+                    if (ssh_keyfile := ssh_stage.get('keyfile', None)): keyfile_arg = f' -i {ssh_keyfile}'
+                    if (ssh_port := ssh_stage.get('port', None)): port_arg = f' -p {ssh_port}'
+                    command = f'ssh {ssh_stage["host"]}{login_arg}{keyfile_arg}{port_arg} -t {escape(command)}'
 
-        command = f'"{command}"'
+        #command = f'"{command}"'
+        command = f'{escape(command)}'
 
-        targetWindows.add_to_first_free_index(windowName, command)
+        target_windows.add_to_first_free_index(window_name, command)
 
-    openWindows = NameCommandList()
-    for line in execute(f'tmux list-windows -t {setupName} -F "#{{E:window_index}} @*@ #{{E:window_name}} @*@ #{{E:pane_start_command}}"').split('\n'):
+    open_windows = NameCommandList()
+    for line in execute(f'tmux list-windows -t {setup_name} -F "#{{E:window_index}} @*@ #{{E:window_name}} @*@ #{{E:pane_start_command}}"').split('\n'):
         if not line: continue
         [index, name, command] = line.split(' @*@ ')
         if not command.startswith('"'): command = f'"{command}"'
-        openWindows.add(int(index), name, command)
+        open_windows.add(int(index), name, command)
 
-    if openWindows.size() == 0:
-        execute(f'tmux new-session -d -s {setupName} -n _default bash')
-        openWindows.add(0, '_default', '"bash"')
+    if open_windows.size() == 0:
+        execute(f'tmux new-session -d -s {setup_name} -n _default bash')
+        open_windows.add(0, '_default', '"bash"')
 
-    usedNames = dict()
+    used_names = dict()
 
-    for [index, name, command] in openWindows:
-        targetIndex = targetWindows.get_first_index_by_name(name)
-        targetCommand = targetIndex != None and targetWindows.get_command(targetIndex) or None
+    for [index, name, command] in open_windows:
+        target_index = target_windows.get_first_index_by_name(name)
+        target_command = target_index != None and target_windows.get_command(target_index) or None
 
-        if targetCommand == command and not name in usedNames:
-            usedNames[name] = True
+        if target_command == command and not name in used_names:
+            used_names[name] = True
         else:
             if name != '_default':
-                if openWindows.size() == 1:
-                    freeIndex = openWindows.first_free_index()
-                    execute(f'tmux new-window -t {setupName}:{freeIndex} -n _default bash')
-                    openWindows.add(freeIndex, "_default", '"bash"')
-                execute(f'tmux kill-window -t {setupName}:{index}')
-                openWindows.delete_index(index)
+                if open_windows.size() == 1:
+                    free_index = open_windows.first_free_index()
+                    execute(f'tmux new-window -t {setup_name}:{free_index} -n _default bash')
+                    open_windows.add(free_index, "_default", '"bash"')
+                execute(f'tmux kill-window -t {setup_name}:{index}')
+                open_windows.delete_index(index)
 
-    for [index, name, command] in targetWindows:
-        if not openWindows.has_name(name) or openWindows.get_command(openWindows.get_first_index_by_name(name)) != command:
-            freeIndex = not openWindows.has_index(index) and index or openWindows.first_free_index()
-            execute(f'tmux new-window -t {setupName}:{freeIndex} -n {name} {command}')
-            openWindows.add(freeIndex, name, command)
+    for [index, name, command] in target_windows:
+        if not open_windows.has_name(name) or open_windows.get_command(open_windows.get_first_index_by_name(name)) != command:
+            free_index = not open_windows.has_index(index) and index or open_windows.first_free_index()
+            execute(f'tmux new-window -t {setup_name}:{free_index} -n {name} {command}')
+            open_windows.add(free_index, name, command)
 
-        openIndex = openWindows.get_first_index_by_name(name)
-        if openIndex != index:
-            if openWindows.has_index(index):
-                execute(f'tmux swap-window -s {setupName}:{openIndex} -t {setupName}:{index}')
-                openWindows.swap_indexes(openIndex, index)
+        open_index = open_windows.get_first_index_by_name(name)
+        if open_index != index:
+            if open_windows.has_index(index):
+                execute(f'tmux swap-window -s {setup_name}:{open_index} -t {setup_name}:{index}')
+                open_windows.swap_indexes(open_index, index)
             else:
-                execute(f'tmux move-window -s {setupName}:{openIndex} -t {setupName}:{index}')
-                openWindows.move_index_to(openIndex, index)
+                execute(f'tmux move-window -s {setup_name}:{open_index} -t {setup_name}:{index}')
+                open_windows.move_index_to(open_index, index)
         else:
-            execute(f'tmux respawn-pane -t {setupName}:{index}')
+            execute(f'tmux respawn-pane -t {setup_name}:{index}')
 
-        execute(f'tmux set-window-option -t {setupName}:{index} remain-on-exit on')
-        execute(f'tmux set-hook -t {setupName}:{index} pane-exited "tmux respawn-pane -t {setupName}:{index}"')
-        execute(f'tmux set-hook -t {setupName}:{index} pane-died "tmux respawn-pane -t {setupName}:{index}"')
+        execute(f'tmux set-window-option -t {setup_name}:{index} remain-on-exit on')
+        execute(f'tmux set-hook -t {setup_name}:{index} pane-exited "tmux respawn-pane -t {setup_name}:{index}"')
+        execute(f'tmux set-hook -t {setup_name}:{index} pane-died "tmux respawn-pane -t {setup_name}:{index}"')
 
-    if openWindows.has_name('_default'):
-        execute(f'tmux kill-window -t {setupName}:_default')
-    
-def start_sessions(sessions, select = False):
-    selectedSessions = list(sessions.keys())
-    selectedSessions.sort()
-    if select: selectedSessions = choose_elements('sessions to start', selectedSessions)
+    if open_windows.has_name('_default'):
+        execute(f'tmux kill-window -t {setup_name}:_default')
 
-    for sessionName in selectedSessions:
-        session = sessions.get(sessionName)
-        start(session)
-
-def help():
-    print(f'Usage:')
-    print(f'pmux -a: attach to a session')
-    print(f'pmux -c: create user local config file for saving used presets ({userConfigFile})')
-    print(f'pmux <config file list>')
-
-if len(sys.argv) < 2:
-    if not os.path.exists(userConfigFile):
-        help()
-        sys.exit(1)
-    else:
-        with open(userConfigFile, "r") as stream:
-            try:
-                userConfig = yaml.safe_load(stream)
-            except yaml.YAMLError as exc:
-                print(exc)
-                sys.exit(1)
-            
-            if userConfig: start_sessions(userConfig.get('presetsCache'), True)
-
-elif sys.argv[1] == '-a':
+def run_attach(args):
     sessions = list(filter(lambda x: x != '', execute('tmux list-sessions -F "#S"').split('\n')))
 
     if len(sessions) > 0:
-        sessionName = choose_elements('a session to attach', sessions, True)
-        if sessionName != None: attach(sessionName)
-    
-        print('no sessions found or selected')
-        sys.exit(1)
-elif sys.argv[1] == '-c':
-    with open(userConfigFile, "a+") as f:
-        pass
-elif sys.argv[1] == '-h' or sys.argv[1] == '--help' or sys.argv[1] == '-?':
-    help()
-    sys.exit(0)
-else:
-    userConfig = dict()
+        session_name = args.name
+        if session_name == None:
+            session_name = choose_elements('a session to attach', sessions, True)
+        if session_name != None and session_name in sessions: 
+            attach(session_name)
+        else:
+            raise Exception(f'session not found: {session_name}')
+    else:
+        raise Exception('no sessions running')
 
-    if os.path.exists(userConfigFile):
-        with open(userConfigFile, "r") as stream:
-            try:
-                userConfig = yaml.safe_load(stream) or dict()
-                if 'presetsCache' not in userConfig: userConfig['presetsCache'] = dict()
-            except yaml.YAMLError as exc:
-                print(exc)
-                sys.exit(1)
+def run_start(args):
+    files = args.files
+    save = args.save
+    user_config = None
+
+    if os.path.exists(user_config_file): 
+        with open(user_config_file, "r") as stream:
+            user_config = yaml.safe_load(stream)
 
     sessions = dict()
-    select = True
 
-    for filename in sys.argv[1:]:
-        if filename == '-f': 
-            select = False
-            continue
+    if len(files) > 0:
+        for file in files:
+            if os.path.exists(file):
+                with open(file, "r") as stream:
+                    config = yaml.safe_load(stream)
+                    for session_name in config:
+                        if session_name in sessions:
+                            raise Exception(f'session {session_name} already defined')
+                        sessions[session_name] = config[session_name]
+            else:
+                raise Exception(f'no such file: {file}')
+    else:
+        if user_config is not None and 'presetsCache' in user_config:
+            sessions = user_config['presetsCache']
+            save = False
+        else: 
+            raise Exception('no files specified')
+    
+    for session_name in sessions:
+        session = sessions[session_name]
+        verify_session_config(session_name, session)
 
-        with open(filename, "r") as stream:
-            try:
-                config = yaml.safe_load(stream)
-                
-                for sessionName in config.keys():
-                    session = config.get(sessionName)
-                    if 'name' not in session: 
-                        raise Exception(f'no name for session {sessionName}')
-                    name = session.get('name')
-                    if name in sessions:
-                        raise Exception(f'duplicate name {name} for session {sessionName}')
-                    sessions[name] = session
-                    if userConfig:
-                        userConfig['presetsCache'][name] = config.get(sessionName)
+    names = list(sessions.keys())
 
-            except yaml.YAMLError as exc:
-                print(exc)
+    if not args.all:
+        if not args.names or len(args.names) == 0:
+            names = choose_elements('sessions to start', names)
+        else:
+            names = args.names
+            for name in names:
+                if not name in names:
+                    raise Exception(f'no such session: {name}')
 
-    start_sessions(sessions, select)
+    if save:
+        if user_config is None: user_config = dict()
+        if not 'presetsCache' in user_config: user_config['presetsCache'] = dict()
+        for session_name in names:
+            user_config['presetsCache'][session_name] = sessions[session_name]
+        with open(user_config_file, "w") as stream:
+            yaml.dump(user_config, stream)
 
-    if userConfig:
-        with open(userConfigFile, "w") as stream:
-            try:
-                yaml.dump(userConfig, stream, default_flow_style=False)
-            except yaml.YAMLError as exc:
-                print(exc)
-                sys.exit(1)
+    for session_name in names:
+        start(sessions[session_name])    
+
+def run_kill(args):
+    names = args.names
+
+    sessions = list(filter(lambda x: x != '', execute('tmux list-sessions -F "#S"').split('\n')))
+
+    if len(sessions) == 0:
+        raise Exception('no sessions running')
+
+    if len(names) == 0:
+        if args.all:
+            names = sessions
+        else:
+            names = choose_elements('sessions to kill', sessions)
+    else:
+        for name in names:
+            if not name in sessions:
+                raise Exception(f'no such session: {name}')
+
+    for name in names:
+        execute(f'tmux kill-session -t {name}')
+
+def run_reload(args):
+    names = args.names
+
+    sessions = list(filter(lambda x: x != '', execute('tmux list-sessions -F "#S"').split('\n')))
+
+    if len(sessions) == 0:
+        raise Exception('no sessions running')
+
+    if len(names) == 0:
+        if args.all:
+            names = sessions
+        else:
+            names = choose_elements('sessions to reload', sessions)
+    else:
+        for name in names:
+            if not name in sessions:
+                raise Exception(f'no such session: {name}')
+
+    for name in names:
+        for line in execute(f'tmux list-windows -t {name} -F "#{{E:window_index}} @*@ #{{E:window_name}} @*@ #{{E:pane_dead}}"').split('\n'):
+            if not line: continue
+            [index, pane, dead] = line.split(' @*@ ')
+            if dead == '1':
+                execute(f'tmux respawn-pane -t {name}:{index}')
+
+parser = argparse.ArgumentParser(description='tmux session manager')
+subparsers = parser.add_subparsers(help='sub-command help', dest='command')
+
+start_parser = subparsers.add_parser('s', help='start new sessions from yaml configs (select at selection screen)')
+start_parser.add_argument('-a', '--all', action='store_true', help='process all the sessions omitting selection screen')
+start_parser.add_argument('-s', '--save', action='store_true', help='save started sessions to config file')
+start_parser.add_argument('-n', '--names', nargs='*', help='session names to start')
+start_parser.add_argument('-v', '--verbose', action='store_true', help='print tmux commands executed')
+start_parser.add_argument('files', nargs='*', help='yaml config files to start sessions from')
+
+kill_parser = subparsers.add_parser('k', help='kill sessions (session list or select at selection screen)')
+kill_parser.add_argument('-a', '--all', action='store_true', help='process all the sessions omitting selection screen')
+kill_parser.add_argument('-v', '--verbose', action='store_true', help='print tmux commands executed')
+kill_parser.add_argument('names', nargs='*', help='session names to kill')
+
+attach_parser = subparsers.add_parser('a', help='attach to session (session name or select at selection screen)')
+attach_parser.add_argument('-v', '--verbose', action='store_true', help='print tmux commands executed')
+attach_parser.add_argument('name', nargs='?', help='session name to attach to')
+
+reload_parser = subparsers.add_parser('r', help='reload windows')
+reload_parser.add_argument('-v', '--verbose', action='store_true', help='print tmux commands executed')
+reload_parser.add_argument('-a', '--all', action='store_true', help='process all the sessions omitting selection screen')
+reload_parser.add_argument('names', nargs='*', help='session names to reload')
+
+help_parser = subparsers.add_parser('h', help='show help')
+
+subparsers_actions = [
+    action for action in parser._actions 
+    if isinstance(action, argparse._SubParsersAction)]
+
+args = parser.parse_args()
+
+verbose = args.verbose
+
+try:
+    if args.command == 's':
+        run_start(args)
+    elif args.command == 'k':
+        run_kill(args)
+    elif args.command == 'a':
+        run_attach(args)
+    elif args.command == 'r':
+        run_reload(args)
+    elif args.command == 'h':
+        for subparsers_action in subparsers_actions:
+            for choice, subparser in subparsers_action.choices.items():
+                print("command '{}'".format(choice))
+                print(subparser.format_help())
+except Exception as e:
+    #print(e)
+    raise e
+
+exit(0)

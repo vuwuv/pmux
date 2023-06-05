@@ -1,16 +1,19 @@
 doubleSsh:  
   name: doubleSsh
   multihistory: true
-  ssh: 
+  ssh:
     main:
-      host: main
-      login: root
+      host: gate
+      login: user
+      parent:
+        host: <HOST>
+        login: user
   windows:
     alpha:
       ssh: 
-        - main
-        - host: alpha
+        preset: main
+        $HOST: alpha
     beta:
       ssh: 
-        - main
-        - host: beta
+        preset: main
+        $HOST: beta
